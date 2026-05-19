@@ -174,6 +174,12 @@ performance optimization and security requirements.`,
 		"max allowed unwrap queue delay in milliseconds (0 for default 250ms)")
 	cmd.Flags().IntVar(&cfg.NumSphinxWorkers, "numSphinxWorkers", 0,
 		"number of Sphinx crypto workers per mix node (0 for default 2)")
+	cmd.Flags().BoolVar(&cfg.EnableWebTransport, "webtransport", false,
+		"enable WebTransport listener on generated gateway nodes")
+	cmd.Flags().StringVar(&cfg.WebTransportCertFile, "webtransportCertFile", "",
+		"absolute TLS certificate path for generated gateway WebTransport listeners")
+	cmd.Flags().StringVar(&cfg.WebTransportKeyFile, "webtransportKeyFile", "",
+		"absolute TLS private key path for generated gateway WebTransport listeners")
 
 	// Logging flags
 	cmd.Flags().StringVar(&cfg.LogLevel, "logLevel", genconfig.DebugLogLevel,

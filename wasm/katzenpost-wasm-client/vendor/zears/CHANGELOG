@@ -1,0 +1,13 @@
+v0.2.1:
+
+- Documentation fixes
+- Small speed improvements
+
+v0.2.0:
+
+- Added the simd feature
+- Speed improvements
+
+v0.1.0:
+
+- Initial release

@@ -466,6 +466,10 @@ var (
 	// of a name server lookup
 	TransportQUIC string = "quic"
 
+	// TransportWebTransport is WebTransport over HTTP/3, used by browser
+	// clients as an alternate gateway entry transport.
+	TransportWebTransport string = "webtransport"
+
 	// TransportOnion is a tor hidden service, to be announced in PKI
 	TransportOnion string = "onion"
 

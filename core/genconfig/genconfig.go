@@ -117,6 +117,9 @@ type Config struct {
 	SendSlack                int
 	UnwrapDelay              int
 	NumSphinxWorkers         int
+	EnableWebTransport       bool
+	WebTransportCertFile     string
+	WebTransportKeyFile      string
 }
 
 type Katzenpost struct {
@@ -139,27 +142,30 @@ type Katzenpost struct {
 	ReplicaNodeConfigs []*rConfig.Config
 	CourierConfigs     []*courierConfig.Config
 
-	BasePort        uint16
-	LastPort        uint16
-	LastReplicaPort uint16
-	ReplicaNodeIdx  int
-	BindAddr        string
-	NodeIdx         int
-	GatewayIdx      int
-	ServiceNodeIdx  int
+	BasePort              uint16
+	LastPort              uint16
+	LastReplicaPort       uint16
+	ReplicaNodeIdx        int
+	BindAddr              string
+	NodeIdx               int
+	GatewayIdx            int
+	ServiceNodeIdx        int
 	NoClientDecoy         bool
 	NoCourierReplicaDecoy bool
 	NoMixDecoy            bool
 	NoMetrics             bool
-	PyroscopeDirauth   bool
-	PyroscopeKpclientd bool
-	EpochDuration     string
-	DebugConfig       *cConfig.Debug
-	SchedulerSlack    int
-	SchedulerMaxBurst int
-	SendSlack         int
-	UnwrapDelay       int
-	NumSphinxWorkers  int
+	PyroscopeDirauth      bool
+	PyroscopeKpclientd    bool
+	EpochDuration         string
+	DebugConfig           *cConfig.Debug
+	SchedulerSlack        int
+	SchedulerMaxBurst     int
+	SendSlack             int
+	UnwrapDelay           int
+	NumSphinxWorkers      int
+	EnableWebTransport    bool
+	WebTransportCertFile  string
+	WebTransportKeyFile   string
 }
 
 type AuthById []*vConfig.Authority
@@ -461,6 +467,7 @@ func (s *Katzenpost) GenNodeConfig(isGateway, isServiceNode bool, isVoting bool)
 	if isGateway {
 		cfg.Management = new(sConfig.Management)
 		cfg.Management.Enable = true
+		cfg.Gateway = &sConfig.Gateway{}
 	}
 	if isServiceNode {
 		cfg.Management = new(sConfig.Management)
@@ -487,6 +494,18 @@ func (s *Katzenpost) GenNodeConfig(isGateway, isServiceNode bool, isVoting bool)
 	}
 	if s.NumSphinxWorkers > 0 {
 		cfg.Debug.NumSphinxWorkers = s.NumSphinxWorkers
+	}
+	if isGateway && s.EnableWebTransport {
+		wtPort := s.LastPort
+		s.LastPort += 1
+		cfg.Gateway.WebTransport = &sConfig.WebTransport{
+			Enable:      true,
+			BindAddress: fmt.Sprintf("%s:%d", s.BindAddr, wtPort),
+			PublicURL:   fmt.Sprintf("https://%s:%d/.well-known/katzenpost-wt", s.BindAddr, wtPort),
+			Path:        "/.well-known/katzenpost-wt",
+			CertFile:    s.WebTransportCertFile,
+			KeyFile:     s.WebTransportKeyFile,
+		}
 	}
 
 	// PKI section.
@@ -578,7 +597,9 @@ func (s *Katzenpost) GenNodeConfig(isGateway, isServiceNode bool, isVoting bool)
 
 	} else if isGateway {
 		s.GatewayIdx++
-		cfg.Gateway = &sConfig.Gateway{}
+		if cfg.Gateway == nil {
+			cfg.Gateway = &sConfig.Gateway{}
+		}
 	} else {
 		s.NodeIdx++
 	}
@@ -813,6 +834,9 @@ func InitializeKatzenpost(cfg *Config) *Katzenpost {
 	s.SendSlack = cfg.SendSlack
 	s.UnwrapDelay = cfg.UnwrapDelay
 	s.NumSphinxWorkers = cfg.NumSphinxWorkers
+	s.EnableWebTransport = cfg.EnableWebTransport
+	s.WebTransportCertFile = cfg.WebTransportCertFile
+	s.WebTransportKeyFile = cfg.WebTransportKeyFile
 
 	return s
 }

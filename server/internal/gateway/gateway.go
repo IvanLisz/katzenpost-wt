@@ -36,6 +36,8 @@ type gateway struct {
 
 	ch    chan interface{}
 	spool spool.Spool
+
+	wtReplySessions map[[sConstants.RecipientIDLength]byte]chan<- []byte
 }
 
 func (p *gateway) Halt() {
@@ -69,6 +71,20 @@ func (p *gateway) OnPacket(pkt *packet.Packet) {
 	case <-p.HaltCh():
 		p.log.Debugf("Terminating gracefully.")
 		return
+	}
+}
+
+func (p *gateway) RegisterWebTransportReplySession(recipient [sConstants.RecipientIDLength]byte, ch chan<- []byte) {
+	p.Lock()
+	defer p.Unlock()
+	p.wtReplySessions[recipient] = ch
+}
+
+func (p *gateway) UnregisterWebTransportReplySession(recipient [sConstants.RecipientIDLength]byte, ch chan<- []byte) {
+	p.Lock()
+	defer p.Unlock()
+	if current, ok := p.wtReplySessions[recipient]; ok && current == ch {
+		delete(p.wtReplySessions, recipient)
 	}
 }
 
@@ -220,6 +236,23 @@ func (p *gateway) onSURBReply(pkt *packet.Packet, recipient []byte) {
 		return
 	}
 
+	var recipientKey [sConstants.RecipientIDLength]byte
+	copy(recipientKey[:], recipient)
+	p.Lock()
+	wtReplyCh := p.wtReplySessions[recipientKey]
+	p.Unlock()
+	if wtReplyCh != nil {
+		reply := make([]byte, len(pkt.Payload))
+		copy(reply, pkt.Payload)
+		select {
+		case wtReplyCh <- reply:
+			p.log.Debugf("Delivered SURB-Reply to WebTransport session: %v", pkt.ID)
+			return
+		default:
+			p.log.Debugf("WebTransport SURB-Reply session is not ready, storing reply: %v", pkt.ID)
+		}
+	}
+
 	// Store the payload in the spool.
 	if err := p.spool.StoreSURBReply(recipient, &pkt.SurbReply.ID, pkt.Payload); err != nil {
 		p.log.Debugf("Failed to store SURB-Reply: %v (%v)", pkt.ID, err)
@@ -260,9 +293,10 @@ func (p *gateway) onToUser(pkt *packet.Packet, recipient []byte) {
 // New constructs a new provider instance.
 func New(glue glue.Glue) (glue.Gateway, error) {
 	p := &gateway{
-		glue: glue,
-		log:  glue.LogBackend().GetLogger("gateway"),
-		ch:   make(chan interface{}, InboundPacketsChannelSize),
+		glue:            glue,
+		log:             glue.LogBackend().GetLogger("gateway"),
+		ch:              make(chan interface{}, InboundPacketsChannelSize),
+		wtReplySessions: make(map[[sConstants.RecipientIDLength]byte]chan<- []byte),
 	}
 
 	cfg := glue.Config()

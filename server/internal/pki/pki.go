@@ -871,6 +871,12 @@ func New(glue glue.Glue) (glue.PKI, error) {
 	if p.descAddrMap, err = makeDescAddrMap(glue.Config().Server.Addresses); err != nil {
 		return nil, err
 	}
+	if cfg := glue.Config().Gateway; cfg != nil && cfg.WebTransport != nil && cfg.WebTransport.Enable {
+		p.descAddrMap[cpki.TransportWebTransport] = append(
+			p.descAddrMap[cpki.TransportWebTransport],
+			cfg.WebTransport.PublicURL,
+		)
+	}
 	if len(p.descAddrMap) == 0 {
 		return nil, errors.New("Descriptor address map is zero size.")
 	}

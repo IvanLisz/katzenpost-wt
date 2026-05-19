@@ -33,9 +33,12 @@ reunion/servers/reunion_katzenpost_server/reunion_katzenpost_server
 .idea
 
 dist/
+wasm/katzenpost-wasm-client/dist/
+wasm/katzenpost-wasm-client/node_modules/
+wasm/katzenpost-wasm-client/target/
+wasm/katzenpost-wasm-client/web/pkg/
 
 docs/web/Admin_guide/target/en/
 
 pigeonhole/testdata/fuzz
-
 

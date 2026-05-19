@@ -269,6 +269,22 @@ func isDescriptorAddressWellFormed(transport, addr string, isGatewayNode bool, a
 		return err
 	}
 
+	if transport == TransportWebTransport {
+		if !isGatewayNode {
+			return fmt.Errorf("Non-gateway published Transport '%v'", transport)
+		}
+		if u.Scheme != "https" {
+			return fmt.Errorf("WebTransport descriptor address %q must use https", addr)
+		}
+		if _, _, err := net.SplitHostPort(u.Host); err != nil {
+			return fmt.Errorf("invalid descriptor address %q for transport %q: %w", addr, transport, err)
+		}
+		if u.Path == "" {
+			return fmt.Errorf("WebTransport descriptor address %q must include a path", addr)
+		}
+		return nil
+	}
+
 	switch u.Scheme {
 	case TransportWS, TransportTCP, TransportTCPv4, TransportTCPv6, TransportQUIC:
 		if _, _, err := net.SplitHostPort(u.Host); err != nil {

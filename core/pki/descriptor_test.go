@@ -116,3 +116,37 @@ func TestDescriptor(t *testing.T) {
 
 	require.True(signed.Verify(identityPub))
 }
+
+func TestWebTransportDescriptorAddressValidation(t *testing.T) {
+	gatewayErr := isDescriptorAddressWellFormed(
+		TransportWebTransport,
+		"https://gateway.example:443/.well-known/katzenpost-wt",
+		true,
+		true,
+	)
+	require.NoError(t, gatewayErr)
+
+	err := isDescriptorAddressWellFormed(
+		TransportWebTransport,
+		"https://mix.example:443/.well-known/katzenpost-wt",
+		false,
+		true,
+	)
+	require.Error(t, err)
+
+	err = isDescriptorAddressWellFormed(
+		TransportWebTransport,
+		"http://gateway.example:443/.well-known/katzenpost-wt",
+		true,
+		true,
+	)
+	require.Error(t, err)
+
+	err = isDescriptorAddressWellFormed(
+		TransportWebTransport,
+		"https://gateway.example/.well-known/katzenpost-wt",
+		true,
+		true,
+	)
+	require.Error(t, err)
+}

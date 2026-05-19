@@ -20,6 +20,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/mail"
 	"net/netip"
 	"net/url"
@@ -57,8 +58,8 @@ const (
 	defaultGatewayDelay        = 500       // 500 ms.
 	defaultServiceDelay        = 500       // 500 ms.
 	defaultKaetzchenDelay      = 750       // 750 ms.
-	defaultSpoolDB = "spool.db"
-	defaultManagementSocket = "management_sock"
+	defaultSpoolDB             = "spool.db"
+	defaultManagementSocket    = "management_sock"
 
 	// BackendBolt is a BoltDB based backend.
 	BackendBolt = "bolt"
@@ -344,8 +345,30 @@ type Gateway struct {
 	// transport is likely ("tcp") (`core/pki.TransportTCP`).
 	AltAddresses map[string][]string
 
+	// WebTransport configures the browser-facing WebTransport entry listener.
+	WebTransport *WebTransport
+
 	// SpoolDB is the user message spool configuration.
 	SpoolDB *SpoolDB
+}
+
+// WebTransport is the gateway WebTransport listener configuration.
+type WebTransport struct {
+	// Enable starts the WebTransport listener when true.
+	Enable bool
+
+	// BindAddress is the UDP host:port the HTTP/3 WebTransport server binds.
+	BindAddress string
+
+	// PublicURL is the HTTPS URL advertised in the PKI descriptor.
+	PublicURL string
+
+	// Path is the WebTransport endpoint path. If empty, it is derived from PublicURL.
+	Path string
+
+	// CertFile and KeyFile are TLS credentials trusted by the browser.
+	CertFile string
+	KeyFile  string
 }
 
 // SpoolDB is the user message spool configuration.
@@ -477,6 +500,16 @@ func (pCfg *Gateway) applyDefaults(sCfg *Server) {
 		}
 	default:
 	}
+	if pCfg.WebTransport != nil && pCfg.WebTransport.Enable {
+		if pCfg.WebTransport.Path == "" && pCfg.WebTransport.PublicURL != "" {
+			if u, err := url.Parse(pCfg.WebTransport.PublicURL); err == nil {
+				pCfg.WebTransport.Path = u.EscapedPath()
+			}
+		}
+		if pCfg.WebTransport.Path == "" {
+			pCfg.WebTransport.Path = "/.well-known/katzenpost-wt"
+		}
+	}
 }
 
 func (pCfg *ServiceNode) validate() error {
@@ -510,6 +543,40 @@ func (pCfg *Gateway) validate() error {
 		}
 	default:
 		return fmt.Errorf("config: Provider: Invalid SpoolDB Backend: '%v'", pCfg.SpoolDB.Backend)
+	}
+
+	if pCfg.WebTransport != nil && pCfg.WebTransport.Enable {
+		if pCfg.WebTransport.BindAddress == "" {
+			return errors.New("config: Gateway: WebTransport BindAddress is not set")
+		}
+		if _, _, err := net.SplitHostPort(pCfg.WebTransport.BindAddress); err != nil {
+			return fmt.Errorf("config: Gateway: WebTransport BindAddress '%v' is invalid: %v", pCfg.WebTransport.BindAddress, err)
+		}
+		if pCfg.WebTransport.PublicURL == "" {
+			return errors.New("config: Gateway: WebTransport PublicURL is not set")
+		}
+		u, err := url.Parse(pCfg.WebTransport.PublicURL)
+		if err != nil {
+			return fmt.Errorf("config: Gateway: WebTransport PublicURL '%v' is invalid: %v", pCfg.WebTransport.PublicURL, err)
+		}
+		if u.Scheme != "https" {
+			return fmt.Errorf("config: Gateway: WebTransport PublicURL '%v' must use https", pCfg.WebTransport.PublicURL)
+		}
+		if _, _, err := net.SplitHostPort(u.Host); err != nil {
+			return fmt.Errorf("config: Gateway: WebTransport PublicURL '%v' is invalid: %v", pCfg.WebTransport.PublicURL, err)
+		}
+		if pCfg.WebTransport.Path == "" || pCfg.WebTransport.Path[0] != '/' {
+			return fmt.Errorf("config: Gateway: WebTransport Path '%v' is invalid", pCfg.WebTransport.Path)
+		}
+		if pCfg.WebTransport.CertFile == "" || pCfg.WebTransport.KeyFile == "" {
+			return errors.New("config: Gateway: WebTransport CertFile and KeyFile must be set")
+		}
+		if !filepath.IsAbs(pCfg.WebTransport.CertFile) {
+			return fmt.Errorf("config: Gateway: WebTransport CertFile '%v' is not an absolute path", pCfg.WebTransport.CertFile)
+		}
+		if !filepath.IsAbs(pCfg.WebTransport.KeyFile) {
+			return fmt.Errorf("config: Gateway: WebTransport KeyFile '%v' is not an absolute path", pCfg.WebTransport.KeyFile)
+		}
 	}
 
 	return nil

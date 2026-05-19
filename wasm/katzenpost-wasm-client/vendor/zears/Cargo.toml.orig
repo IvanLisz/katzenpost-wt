@@ -1,0 +1,27 @@
+[package]
+name = "zears"
+version = "0.2.1"
+edition = "2024"
+license = "MIT"
+description = "Rust implementation of the AEZ v5 cipher."
+readme = "README.md"
+repository = "https://codeberg.org/dunj3/zears"
+keywords = ["aez", "aezv5", "aead", "encryption", "cipher"]
+categories = ["algorithms", "cryptography"]
+
+[features]
+simd = []
+
+[dependencies]
+aes = { version = "0.8.4", features = ["hazmat"] }
+blake2 = "0.10.6"
+constant_time_eq = "0.4.2"
+cpufeatures = "0.2.17"
+
+[dev-dependencies]
+hex = "0.4.3"
+criterion = "0.5.1"
+
+[[bench]]
+name = "zears"
+harness = false

@@ -67,6 +67,9 @@ schedulerMaxBurst=0
 sendSlack=0
 unwrapDelay=0
 numSphinxWorkers=0
+webtransport?=false
+webtransportCertFile?=
+webtransportKeyFile?=
 
 # hybrid ctidh PQ can work here, but requires manually building ctidh.
 nike=x25519
@@ -141,6 +144,10 @@ ifneq ($(numSphinxWorkers),0)
   numSphinxWorkersFlag=--numSphinxWorkers $(numSphinxWorkers)
 endif
 
+ifeq ($(webtransport),true)
+  webtransportFlag=--webtransport --webtransportCertFile "$(webtransportCertFile)" --webtransportKeyFile "$(webtransportKeyFile)"
+endif
+
 # log_level can be DEBUG, INFO, NOTICE, WARNING, ERROR, CRITICAL
 log_level=DEBUG
 
@@ -189,6 +196,7 @@ $(docker_compose_yml): ../cmd/genconfig/main.go $(distro)_base.stamp | $(net_nam
 		${noMixDecoy} ${noDecoy} ${noClientDecoy} ${noCourierReplicaDecoy} ${noMetricsFlag} ${epochDurationFlag} ${pyroscopeDirauthFlag} ${pyroscopeKpclientdFlag} \
 		${schedulerSlackFlag} ${schedulerMaxBurstFlag} ${sendSlackFlag} \
 		${unwrapDelayFlag} ${numSphinxWorkersFlag} \
+		${webtransportFlag} \
 		--UserForwardPayloadLength $(UserForwardPayloadLength) --logLevel $(log_level)'
 
 # Generate configuration files only (without docker containers)
@@ -205,6 +213,7 @@ config-only: | $(net_name)
 		${noMixDecoy} ${noDecoy} ${noClientDecoy} ${noCourierReplicaDecoy} ${noMetricsFlag} ${epochDurationFlag} ${pyroscopeDirauthFlag} ${pyroscopeKpclientdFlag} \
 		${schedulerSlackFlag} ${schedulerMaxBurstFlag} ${sendSlackFlag} \
 		${unwrapDelayFlag} ${numSphinxWorkersFlag} \
+		${webtransportFlag} \
 		--UserForwardPayloadLength $(UserForwardPayloadLength) --logLevel $(log_level)
 	@echo "Configuration files generated in ./$(net_name)/"
 	@echo "Tests can now use the symlinked configs (e.g., client/testdata/client.toml -> ../../docker/$(net_name)/client/client.toml)"

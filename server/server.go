@@ -490,7 +490,7 @@ func New(cfg *config.Config) (*Server, error) {
 	logStartupStep("listener address selection")
 
 	// Bring the listener(s) online.
-	s.listeners = make([]glue.Listener, 0, len(addresses))
+	s.listeners = make([]glue.Listener, 0, len(addresses)+1)
 	for i, addr := range addresses {
 		listenerStart := time.Now()
 		l, err := incoming.New(goo, s.inboundPackets, i, addr)
@@ -499,6 +499,16 @@ func New(cfg *config.Config) (*Server, error) {
 			return nil, err
 		}
 		s.log.Debugf("server startup: listener %d for %q completed in %v", i, addr, time.Since(listenerStart))
+		s.listeners = append(s.listeners, l)
+	}
+	if s.cfg.Server.IsGatewayNode && s.cfg.Gateway != nil && s.cfg.Gateway.WebTransport != nil && s.cfg.Gateway.WebTransport.Enable {
+		listenerStart := time.Now()
+		l, err := incoming.NewWebTransport(goo, s.inboundPackets, len(s.listeners), s.cfg.Gateway.WebTransport)
+		if err != nil {
+			s.log.Errorf("Failed to spawn WebTransport listener after %v (%v).", time.Since(listenerStart), err)
+			return nil, err
+		}
+		s.log.Debugf("server startup: WebTransport listener completed in %v", time.Since(listenerStart))
 		s.listeners = append(s.listeners, l)
 	}
 	logStartupStep("listeners")

@@ -77,6 +77,8 @@ type Gateway interface {
 	Spool() spool.Spool
 	AuthenticateClient(*wire.PeerCredentials) bool
 	OnPacket(*packet.Packet)
+	RegisterWebTransportReplySession([constants.RecipientIDLength]byte, chan<- []byte)
+	UnregisterWebTransportReplySession([constants.RecipientIDLength]byte, chan<- []byte)
 }
 
 type ServiceNode interface {

@@ -10,11 +10,20 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(packageRoot, "..", "..");
-const topologyRoot = path.join(repoRoot, "docker", "voting_mixnet");
+const topologyRoot = process.env.KPWT_TOPOLOGY_ROOT
+  ? path.resolve(process.env.KPWT_TOPOLOGY_ROOT)
+  : path.join(repoRoot, "docker", "voting_mixnet");
 const gatewayConfig = path.join(topologyRoot, "gateway1", "katzenpost.toml");
 const serviceLog = path.join(topologyRoot, "servicenode1", "katzenpost.log");
 const certPath = process.env.KPWT_CERT ?? path.join(topologyRoot, "certs", "katzenpost-wt.crt");
 const chromiumPath = process.env.CHROMIUM_PATH ?? "/usr/bin/chromium";
+const sphinxMode = process.env.KPWT_SPHINX_MODE ?? "nike";
+const kemName = process.env.KPWT_KEM ?? "x25519";
+const isKEMSphinx = sphinxMode.toLowerCase().startsWith("kem");
+const expectedPacketLength = Number.parseInt(
+  process.env.KPWT_PACKET_LEN ?? (isKEMSphinx ? "3402" : "3082"),
+  10,
+);
 
 function readWebTransportURL() {
   const cfg = readFileSync(gatewayConfig, "utf8");
@@ -209,7 +218,7 @@ async function main() {
     await page.goto(`http://127.0.0.1:${vitePort}/`, { waitUntil: "domcontentloaded" });
 
     const result = await page.evaluate(
-      async ({ url, certHash, trustAnchors, threshold, epochs }) => {
+      async ({ url, certHash, trustAnchors, threshold, epochs, isKEMSphinx, kemName, sphinxMode }) => {
         const mod = await import("/index.ts");
         const options = {
           serverCertificateHashes: [{ algorithm: "sha-256", value: new Uint8Array(certHash) }],
@@ -237,26 +246,51 @@ async function main() {
               failures.push(`epoch ${epoch}: ${checked.state}${checked.error ? `: ${checked.error}` : ""}`);
               continue;
             }
-            const packet = await mod.buildSphinxPacket(
-              checked.rawConsensus,
-              anchors,
-              threshold,
-              BigInt(checked.consensus.epoch),
-              url,
-              "echo",
-              new TextEncoder().encode("mvp3-live-smoke"),
-            );
+            const buildPacket = isKEMSphinx ? mod.buildKEMSphinxPacket : mod.buildSphinxPacket;
+            const buildPacketWithSURB = isKEMSphinx ? mod.buildKEMSphinxPacketWithSURB : mod.buildSphinxPacketWithSURB;
+            const packetPayload = new TextEncoder().encode("mvp3-live-smoke");
+            const packet = isKEMSphinx
+              ? await buildPacket(
+                  checked.rawConsensus,
+                  anchors,
+                  threshold,
+                  BigInt(checked.consensus.epoch),
+                  url,
+                  "echo",
+                  packetPayload,
+                  kemName,
+                )
+              : await buildPacket(
+                  checked.rawConsensus,
+                  anchors,
+                  threshold,
+                  BigInt(checked.consensus.epoch),
+                  url,
+                  "echo",
+                  packetPayload,
+                );
             const ack = await mod.sendSphinxPacket(url, packet, options);
             const replyRequestPayload = new TextEncoder().encode("mvp4-live-smoke");
-            const withSurb = await mod.buildSphinxPacketWithSURB(
-              checked.rawConsensus,
-              anchors,
-              threshold,
-              BigInt(checked.consensus.epoch),
-              url,
-              "echo",
-              replyRequestPayload,
-            );
+            const withSurb = isKEMSphinx
+              ? await buildPacketWithSURB(
+                  checked.rawConsensus,
+                  anchors,
+                  threshold,
+                  BigInt(checked.consensus.epoch),
+                  url,
+                  "echo",
+                  replyRequestPayload,
+                  kemName,
+                )
+              : await buildPacketWithSURB(
+                  checked.rawConsensus,
+                  anchors,
+                  threshold,
+                  BigInt(checked.consensus.epoch),
+                  url,
+                  "echo",
+                  replyRequestPayload,
+                );
             const replyCiphertext = await mod.sendSphinxPacketAndWaitReply(
               url,
               new Uint8Array(withSurb.packet),
@@ -269,15 +303,26 @@ async function main() {
             );
             const replyText = new TextDecoder().decode(replyPlaintext.subarray(0, replyRequestPayload.byteLength));
             const asyncReplyRequestPayload = new TextEncoder().encode("mvp5-live-smoke");
-            const withAsyncSurb = await mod.buildSphinxPacketWithSURB(
-              checked.rawConsensus,
-              anchors,
-              threshold,
-              BigInt(checked.consensus.epoch),
-              url,
-              "echo",
-              asyncReplyRequestPayload,
-            );
+            const withAsyncSurb = isKEMSphinx
+              ? await buildPacketWithSURB(
+                  checked.rawConsensus,
+                  anchors,
+                  threshold,
+                  BigInt(checked.consensus.epoch),
+                  url,
+                  "echo",
+                  asyncReplyRequestPayload,
+                  kemName,
+                )
+              : await buildPacketWithSURB(
+                  checked.rawConsensus,
+                  anchors,
+                  threshold,
+                  BigInt(checked.consensus.epoch),
+                  url,
+                  "echo",
+                  asyncReplyRequestPayload,
+                );
             const receiver = await mod.openOnlineSurbReceiver(
               url,
               new Uint8Array(withAsyncSurb.recipient),
@@ -299,6 +344,8 @@ async function main() {
               asyncReplyPlaintext.subarray(0, asyncReplyRequestPayload.byteLength),
             );
             return {
+              sphinxMode,
+              kemName: isKEMSphinx ? kemName : "",
               proofText: proof.text,
               epoch: checked.consensus.epoch.toString(),
               expiration: checked.consensus.expiration.toString(),
@@ -320,7 +367,7 @@ async function main() {
         }
         throw new Error(`no valid consensus found; ${failures.join("; ")}`);
       },
-      { url: webTransportURL, certHash, trustAnchors, threshold, epochs },
+      { url: webTransportURL, certHash, trustAnchors, threshold, epochs, isKEMSphinx, kemName, sphinxMode },
     );
 
     if (!result.proofText.startsWith("katzenpost-wt-ok")) {
@@ -329,7 +376,7 @@ async function main() {
     if (!result.gateways.some((gateway) => gateway.endpoints.includes(webTransportURL))) {
       throw new Error(`verified consensus does not advertise ${webTransportURL}`);
     }
-    if (result.packetLength !== 3082) {
+    if (result.packetLength !== expectedPacketLength) {
       throw new Error(`unexpected Sphinx packet length: ${result.packetLength}`);
     }
     if (result.packetAck !== "accepted") {

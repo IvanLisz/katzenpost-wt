@@ -1,6 +1,6 @@
 # Katzenpost-over-WebTransport Adversarial Test Report
 
-Date: 2026-05-18
+Date: 2026-05-19
 
 Scope: online-only browser/WASM Katzenpost client path over WebTransport.
 Offline storage, mailbox retrieval, and Pigeonhole are out of scope.
@@ -12,7 +12,7 @@ Offline storage, mailbox retrieval, and Pigeonhole are out of scope.
 | Browser/WASM verifies consensus locally | Passed | `verify_consensus_bytes` validates certificate version, expiration, epoch freshness, trust-anchor length, Ed25519 signatures, and signature threshold before returning a `VerifiedConsensus`. |
 | Browser/WASM rejects invalid, stale, or modified consensus | Passed | Rust tests cover tampered consensus, stale consensus, and packet construction gated on consensus verification. |
 | Browser/WASM selects route locally | Passed | `build_sphinx_packet_bytes` and `build_sphinx_packet_with_surb_bytes` parse the verified document and call local route selection before packet construction. The WT gateway API has no route-selection frame. |
-| Browser/WASM builds Sphinx/SURB material locally | Passed | WASM creates the Sphinx packet, SURB recipient, SURB ID, SURB keys, and encrypted forward payload before any packet is sent to the gateway. |
+| Browser/WASM builds Sphinx/SURB material locally | Passed | WASM creates NIKE Sphinx packets, KEMSphinx/x25519-adapter packets, SURB recipient, SURB ID, SURB keys, and encrypted forward payload before any packet is sent to the gateway. |
 | Gateway only forwards opaque packets | Passed with online metadata caveat | WT `send_packet` accepts one already-built packet and enqueues it. `send_packet_with_reply` and `register_receiver` additionally receive a random recipient ID for online SURB delivery, but not plaintext, route, service, or SURB keys. |
 | Replies work via SURB without gateway learning plaintext | Passed | Live smoke receives encrypted SURB payload from the gateway and only decrypts in browser/WASM with local SURB keys. Rust tests reject tampered SURB reply ciphertext and wrong keys. |
 
@@ -53,6 +53,28 @@ Live smoke result:
   "asyncReplyPlaintextLength": 2574,
   "asyncReplyText": "mvp5-live-smoke",
   "serviceLog": "Processed Kaetzchen request: 13 (No response)"
+}
+```
+
+MVP6 KEMSphinx/x25519-adapter live smoke result:
+
+```json
+{
+  "sphinxMode": "kem-x25519",
+  "kemName": "x25519",
+  "proofText": "katzenpost-wt-okdummy",
+  "epoch": "2357803",
+  "expiration": "2357808",
+  "signatures": 3,
+  "packetLength": 3402,
+  "packetAck": "accepted",
+  "replyCiphertextLength": 2766,
+  "replyPlaintextLength": 2734,
+  "replyText": "mvp4-live-smoke",
+  "asyncPacketAck": "accepted",
+  "asyncReplyCiphertextLength": 2766,
+  "asyncReplyPlaintextLength": 2734,
+  "asyncReplyText": "mvp5-live-smoke"
 }
 ```
 
@@ -128,6 +150,15 @@ Test coverage added or confirmed:
 - `surb_reply_decryption_is_local_and_authenticated`: local SURB reply decrypt
   succeeds with the retained local keys and rejects tampered ciphertext or wrong
   keys.
+- `blake2xb_xof_matches_go_kem_adapter_hash`: Rust/WASM matches the Go
+  BLAKE2Xb hash used by Katzenpost's X25519 KEM adapter.
+- `kemsphinx_x25519_packet_uses_kem_geometry`: KEMSphinx packet construction
+  uses the x25519 KEM-adapter header and packet geometry.
+- `kemsphinx_x25519_surb_uses_kem_geometry`: KEMSphinx SURB construction uses
+  the KEM geometry and keeps reply decryption material local.
+- `kemsphinx_rejects_unsupported_scheme`: the MVP6 KEMSphinx entry point
+  refuses unimplemented KEM schemes instead of silently building the wrong
+  packet format.
 - `TestWebTransportReceiverRejectsInvalidRecipientLength`: WT online receiver
   registration rejects malformed recipient IDs.
 
@@ -168,8 +199,9 @@ Gateway reply behavior:
 - The gateway can correlate an online registered recipient with a later reply on
   that same WT session. That is an online transport metadata leak, not plaintext
   or route delegation.
-- This MVP uses the reduced NIKE/X25519 test geometry. KEMSphinx and full
-  production parameter coverage remain future work.
+- This MVP supports the reduced NIKE/X25519 test geometry and the KEMSphinx
+  x25519 KEM-adapter geometry. Post-quantum KEMSphinx schemes such as `XWING`
+  or `MLKEM768-X25519` remain future work.
 - WASM supply-chain integrity, app signing, CSP, reproducible builds, and key
   storage hardening are not proven by these tests.
 

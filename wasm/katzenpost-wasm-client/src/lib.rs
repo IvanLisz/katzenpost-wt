@@ -25,12 +25,26 @@ const X25519_PUBLIC_KEY_LEN: usize = 32;
 const RECIPIENT_ID_LEN: usize = 32;
 const SURB_ID_LEN: usize = 16;
 const MAC_LEN: usize = 32;
+const SURB_REPLY_LEN: usize = 1 + SURB_ID_LEN;
 const PACKET_LEN: usize = 3082;
 const NR_HOPS: usize = 5;
 const HEADER_LEN: usize = 476;
 const ROUTING_INFO_LEN: usize = 410;
 const PER_HOP_ROUTING_INFO_LEN: usize = 82;
 const SURB_LEN: usize = 572;
+const KEM_X25519_NAME: &str = "x25519";
+const KEM_X25519_CIPHERTEXT_LEN: usize = 32;
+const KEM_X25519_PER_HOP_ROUTING_INFO_LEN: usize =
+    NEXT_NODE_HOP_LEN + SURB_REPLY_LEN + KEM_X25519_CIPHERTEXT_LEN;
+const KEM_X25519_ROUTING_INFO_LEN: usize = KEM_X25519_PER_HOP_ROUTING_INFO_LEN * NR_HOPS;
+const KEM_X25519_HEADER_LEN: usize =
+    SPHINX_PLAINTEXT_HEADER_LEN + KEM_X25519_CIPHERTEXT_LEN + KEM_X25519_ROUTING_INFO_LEN + MAC_LEN;
+const KEM_X25519_SURB_LEN: usize =
+    KEM_X25519_HEADER_LEN + NODE_ID_LEN + SPRP_KEY_LEN + STREAM_IV_LEN;
+const KEM_X25519_FORWARD_PAYLOAD_LEN: usize =
+    USER_FORWARD_PAYLOAD_LEN + SPHINX_PLAINTEXT_HEADER_LEN + KEM_X25519_SURB_LEN;
+const KEM_X25519_PACKET_LEN: usize =
+    KEM_X25519_HEADER_LEN + PAYLOAD_TAG_LEN + KEM_X25519_FORWARD_PAYLOAD_LEN;
 const SPHINX_PLAINTEXT_HEADER_LEN: usize = 2;
 const PAYLOAD_TAG_LEN: usize = 32;
 const FORWARD_PAYLOAD_LEN: usize = 2574;
@@ -89,6 +103,8 @@ pub enum PacketBuildError {
     EmptyTopologyLayer(usize),
     #[error("selected path has {0} hops but MVP3 geometry supports at most {NR_HOPS}")]
     PathTooLong(usize),
+    #[error("unsupported KEMSphinx scheme {0:?}; this MVP supports x25519 KEM adapter")]
+    UnsupportedKem(String),
     #[error("descriptor {0} has no identity key")]
     MissingIdentityKey(String),
     #[error("descriptor {0} has no mix key for epoch {1}")]
@@ -99,6 +115,8 @@ pub enum PacketBuildError {
     RecipientTooLong,
     #[error("payload is larger than {USER_FORWARD_PAYLOAD_LEN} bytes")]
     PayloadTooLong,
+    #[error("routing commands overflow per-hop routing info")]
+    RoutingCommandOverflow,
     #[error("random source failed: {0}")]
     Random(String),
     #[error("HKDF failed")]
@@ -416,6 +434,34 @@ enum RoutingCommand {
     SurbReply([u8; SURB_ID_LEN]),
 }
 
+#[derive(Clone, Copy)]
+struct SphinxGeometry {
+    packet_len: usize,
+    header_len: usize,
+    routing_info_len: usize,
+    per_hop_routing_info_len: usize,
+    surb_len: usize,
+    forward_payload_len: usize,
+}
+
+const NIKE_X25519_GEOMETRY: SphinxGeometry = SphinxGeometry {
+    packet_len: PACKET_LEN,
+    header_len: HEADER_LEN,
+    routing_info_len: ROUTING_INFO_LEN,
+    per_hop_routing_info_len: PER_HOP_ROUTING_INFO_LEN,
+    surb_len: SURB_LEN,
+    forward_payload_len: FORWARD_PAYLOAD_LEN,
+};
+
+const KEM_X25519_GEOMETRY: SphinxGeometry = SphinxGeometry {
+    packet_len: KEM_X25519_PACKET_LEN,
+    header_len: KEM_X25519_HEADER_LEN,
+    routing_info_len: KEM_X25519_ROUTING_INFO_LEN,
+    per_hop_routing_info_len: KEM_X25519_PER_HOP_ROUTING_INFO_LEN,
+    surb_len: KEM_X25519_SURB_LEN,
+    forward_payload_len: KEM_X25519_FORWARD_PAYLOAD_LEN,
+};
+
 struct PacketKeys {
     header_mac: [u8; MAC_LEN],
     header_encryption: [u8; 32],
@@ -632,12 +678,39 @@ fn select_reply_path(
     Ok(path)
 }
 
-fn service_forward_payload(user_payload: &[u8]) -> Result<Vec<u8>, PacketBuildError> {
+fn service_forward_payload_for(
+    geometry: SphinxGeometry,
+    user_payload: &[u8],
+) -> Result<Vec<u8>, PacketBuildError> {
     if user_payload.len() > USER_FORWARD_PAYLOAD_LEN {
         return Err(PacketBuildError::PayloadTooLong);
     }
-    let mut payload = vec![0u8; FORWARD_PAYLOAD_LEN];
-    let user_offset = SPHINX_PLAINTEXT_HEADER_LEN + SURB_LEN;
+    let mut payload = vec![0u8; geometry.forward_payload_len];
+    let user_offset = SPHINX_PLAINTEXT_HEADER_LEN + geometry.surb_len;
+    payload[user_offset..user_offset + user_payload.len()].copy_from_slice(user_payload);
+    Ok(payload)
+}
+
+fn service_forward_payload(user_payload: &[u8]) -> Result<Vec<u8>, PacketBuildError> {
+    service_forward_payload_for(NIKE_X25519_GEOMETRY, user_payload)
+}
+
+fn service_forward_payload_with_surb_for(
+    geometry: SphinxGeometry,
+    user_payload: &[u8],
+    surb: &[u8],
+) -> Result<Vec<u8>, PacketBuildError> {
+    if user_payload.len() > USER_FORWARD_PAYLOAD_LEN {
+        return Err(PacketBuildError::PayloadTooLong);
+    }
+    if surb.len() != geometry.surb_len {
+        return Err(PacketBuildError::SurbLength);
+    }
+    let mut payload = vec![0u8; geometry.forward_payload_len];
+    payload[0] = 1;
+    payload[SPHINX_PLAINTEXT_HEADER_LEN..SPHINX_PLAINTEXT_HEADER_LEN + geometry.surb_len]
+        .copy_from_slice(surb);
+    let user_offset = SPHINX_PLAINTEXT_HEADER_LEN + geometry.surb_len;
     payload[user_offset..user_offset + user_payload.len()].copy_from_slice(user_payload);
     Ok(payload)
 }
@@ -646,23 +719,15 @@ fn service_forward_payload_with_surb(
     user_payload: &[u8],
     surb: &[u8],
 ) -> Result<Vec<u8>, PacketBuildError> {
-    if user_payload.len() > USER_FORWARD_PAYLOAD_LEN {
-        return Err(PacketBuildError::PayloadTooLong);
-    }
-    if surb.len() != SURB_LEN {
-        return Err(PacketBuildError::SurbLength);
-    }
-    let mut payload = vec![0u8; FORWARD_PAYLOAD_LEN];
-    payload[0] = 1;
-    payload[SPHINX_PLAINTEXT_HEADER_LEN..SPHINX_PLAINTEXT_HEADER_LEN + SURB_LEN]
-        .copy_from_slice(surb);
-    let user_offset = SPHINX_PLAINTEXT_HEADER_LEN + SURB_LEN;
-    payload[user_offset..user_offset + user_payload.len()].copy_from_slice(user_payload);
-    Ok(payload)
+    service_forward_payload_with_surb_for(NIKE_X25519_GEOMETRY, user_payload, surb)
 }
 
-fn serialize_commands(commands: &[RoutingCommand], is_terminal: bool) -> Vec<u8> {
-    let mut out = Vec::with_capacity(PER_HOP_ROUTING_INFO_LEN);
+fn serialize_commands(
+    commands: &[RoutingCommand],
+    is_terminal: bool,
+    geometry: SphinxGeometry,
+) -> Result<Vec<u8>, PacketBuildError> {
+    let mut out = Vec::with_capacity(geometry.per_hop_routing_info_len);
     for command in commands {
         match command {
             RoutingCommand::NodeDelay(delay) => {
@@ -679,10 +744,13 @@ fn serialize_commands(commands: &[RoutingCommand], is_terminal: bool) -> Vec<u8>
             }
         }
     }
-    if !is_terminal && PER_HOP_ROUTING_INFO_LEN - out.len() < NEXT_NODE_HOP_LEN {
-        panic!("internal MVP3 path command overflow");
+    if out.len() > geometry.per_hop_routing_info_len {
+        return Err(PacketBuildError::RoutingCommandOverflow);
     }
-    out
+    if !is_terminal && geometry.per_hop_routing_info_len - out.len() < NEXT_NODE_HOP_LEN {
+        return Err(PacketBuildError::RoutingCommandOverflow);
+    }
+    Ok(out)
 }
 
 fn xor_in_place(dst: &mut [u8], src: &[u8]) {
@@ -805,6 +873,159 @@ fn blind_public(public: &[u8; 32], blinding_factor: &[u8; 32]) -> [u8; 32] {
     x25519_dh(blinding_factor, public)
 }
 
+const BLAKE2B_IV: [u64; 8] = [
+    0x6a09_e667_f3bc_c908,
+    0xbb67_ae85_84ca_a73b,
+    0x3c6e_f372_fe94_f82b,
+    0xa54f_f53a_5f1d_36f1,
+    0x510e_527f_ade6_82d1,
+    0x9b05_688c_2b3e_6c1f,
+    0x1f83_d9ab_fb41_bd6b,
+    0x5be0_cd19_137e_2179,
+];
+
+const BLAKE2B_SIGMA: [[usize; 16]; 12] = [
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
+    [11, 8, 12, 0, 5, 2, 15, 13, 10, 14, 3, 6, 7, 1, 9, 4],
+    [7, 9, 3, 1, 13, 12, 11, 14, 2, 6, 5, 10, 4, 0, 15, 8],
+    [9, 0, 5, 7, 2, 4, 10, 15, 14, 1, 11, 12, 6, 8, 3, 13],
+    [2, 12, 6, 10, 0, 11, 8, 3, 4, 13, 7, 5, 15, 14, 1, 9],
+    [12, 5, 1, 15, 14, 13, 4, 10, 0, 7, 6, 3, 9, 2, 8, 11],
+    [13, 11, 7, 14, 12, 1, 3, 9, 5, 0, 15, 4, 8, 6, 2, 10],
+    [6, 15, 14, 9, 11, 3, 0, 8, 12, 2, 13, 7, 1, 4, 10, 5],
+    [10, 2, 8, 4, 7, 6, 1, 5, 15, 11, 9, 14, 3, 12, 13, 0],
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    [14, 10, 4, 8, 9, 15, 13, 6, 1, 12, 0, 2, 11, 7, 5, 3],
+];
+
+fn blake2b_g(v: &mut [u64; 16], a: usize, b: usize, c: usize, d: usize, x: u64, y: u64) {
+    v[a] = v[a].wrapping_add(v[b]).wrapping_add(x);
+    v[d] = (v[d] ^ v[a]).rotate_right(32);
+    v[c] = v[c].wrapping_add(v[d]);
+    v[b] = (v[b] ^ v[c]).rotate_right(24);
+    v[a] = v[a].wrapping_add(v[b]).wrapping_add(y);
+    v[d] = (v[d] ^ v[a]).rotate_right(16);
+    v[c] = v[c].wrapping_add(v[d]);
+    v[b] = (v[b] ^ v[c]).rotate_right(63);
+}
+
+fn blake2b_compress(h: &mut [u64; 8], block: &[u8; 128], t: u64, f0: u64) {
+    let mut m = [0u64; 16];
+    for (idx, chunk) in block.chunks_exact(8).enumerate() {
+        m[idx] = u64::from_le_bytes(chunk.try_into().expect("BLAKE2b chunk is 8 bytes"));
+    }
+
+    let mut v = [0u64; 16];
+    v[..8].copy_from_slice(h);
+    v[8..].copy_from_slice(&BLAKE2B_IV);
+    v[12] ^= t;
+    v[14] ^= f0;
+
+    for sigma in BLAKE2B_SIGMA {
+        blake2b_g(&mut v, 0, 4, 8, 12, m[sigma[0]], m[sigma[1]]);
+        blake2b_g(&mut v, 1, 5, 9, 13, m[sigma[2]], m[sigma[3]]);
+        blake2b_g(&mut v, 2, 6, 10, 14, m[sigma[4]], m[sigma[5]]);
+        blake2b_g(&mut v, 3, 7, 11, 15, m[sigma[6]], m[sigma[7]]);
+        blake2b_g(&mut v, 0, 5, 10, 15, m[sigma[8]], m[sigma[9]]);
+        blake2b_g(&mut v, 1, 6, 11, 12, m[sigma[10]], m[sigma[11]]);
+        blake2b_g(&mut v, 2, 7, 8, 13, m[sigma[12]], m[sigma[13]]);
+        blake2b_g(&mut v, 3, 4, 9, 14, m[sigma[14]], m[sigma[15]]);
+    }
+
+    for i in 0..8 {
+        h[i] ^= v[i] ^ v[i + 8];
+    }
+}
+
+fn blake2b_hash_with_config(config: &[u8; 64], key: &[u8], msg: &[u8]) -> [u8; 64] {
+    let mut h = BLAKE2B_IV;
+    for (idx, chunk) in config.chunks_exact(8).enumerate() {
+        h[idx] ^= u64::from_le_bytes(chunk.try_into().expect("BLAKE2b config word"));
+    }
+
+    let mut t = 0u64;
+    if !key.is_empty() {
+        let mut block = [0u8; 128];
+        block[..key.len()].copy_from_slice(key);
+        t = t.wrapping_add(128);
+        if msg.is_empty() {
+            blake2b_compress(&mut h, &block, t, u64::MAX);
+            let mut out = [0u8; 64];
+            for (idx, word) in h.iter().enumerate() {
+                out[idx * 8..idx * 8 + 8].copy_from_slice(&word.to_le_bytes());
+            }
+            return out;
+        }
+        blake2b_compress(&mut h, &block, t, 0);
+    }
+
+    let mut remaining = msg;
+    while remaining.len() > 128 {
+        let mut block = [0u8; 128];
+        block.copy_from_slice(&remaining[..128]);
+        t = t.wrapping_add(128);
+        blake2b_compress(&mut h, &block, t, 0);
+        remaining = &remaining[128..];
+    }
+
+    let mut block = [0u8; 128];
+    block[..remaining.len()].copy_from_slice(remaining);
+    t = t.wrapping_add(remaining.len() as u64);
+    blake2b_compress(&mut h, &block, t, u64::MAX);
+
+    let mut out = [0u8; 64];
+    for (idx, word) in h.iter().enumerate() {
+        out[idx * 8..idx * 8 + 8].copy_from_slice(&word.to_le_bytes());
+    }
+    out
+}
+
+fn blake2xb_xof_32(key: &[u8], msg: &[u8]) -> [u8; 32] {
+    let mut root_config = [0u8; 64];
+    root_config[0] = 64;
+    root_config[1] = key.len() as u8;
+    root_config[2] = 1;
+    root_config[3] = 1;
+    root_config[12..16].copy_from_slice(&(32u32).to_le_bytes());
+    let root = blake2b_hash_with_config(&root_config, key, msg);
+
+    let mut block_config = [0u8; 64];
+    block_config[0] = 32;
+    block_config[4..8].copy_from_slice(&(64u32).to_le_bytes());
+    block_config[8..12].copy_from_slice(&(0u32).to_le_bytes());
+    block_config[12..16].copy_from_slice(&(32u32).to_le_bytes());
+    block_config[17] = 64;
+    let block = blake2b_hash_with_config(&block_config, &[], &root);
+
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&block[..32]);
+    out
+}
+
+fn kem_adapter_x25519_hash(
+    shared_secret: &[u8; 32],
+    recipient_public: &[u8; 32],
+    ephemeral_public: &[u8; 32],
+) -> [u8; 32] {
+    let mut msg = [0u8; 64];
+    msg[..32].copy_from_slice(recipient_public);
+    msg[32..].copy_from_slice(ephemeral_public);
+    blake2xb_xof_32(shared_secret, &msg)
+}
+
+fn kem_adapter_x25519_encapsulate(
+    public_key: &[u8; 32],
+) -> Result<([u8; 32], [u8; 32]), PacketBuildError> {
+    let mut client_secret = [0u8; 32];
+    getrandom::getrandom(&mut client_secret)
+        .map_err(|err| PacketBuildError::Random(err.to_string()))?;
+    let client_public = PublicKey::from(&StaticSecret::from(client_secret)).to_bytes();
+    let shared_secret = x25519_dh(&client_secret, public_key);
+    let kem_shared_secret = kem_adapter_x25519_hash(&shared_secret, public_key, &client_public);
+    Ok((client_public, kem_shared_secret))
+}
+
 fn create_sphinx_header(
     path: &[PathHop],
 ) -> Result<(Vec<u8>, Vec<([u8; SPRP_KEY_LEN], [u8; STREAM_IV_LEN])>), PacketBuildError> {
@@ -865,7 +1086,8 @@ fn create_sphinx_header(
     let mut mac = [0u8; MAC_LEN];
     for i in (0..nr_hops).rev() {
         let is_terminal = i == nr_hops - 1;
-        let mut fragment = serialize_commands(&path[i].commands, is_terminal);
+        let mut fragment =
+            serialize_commands(&path[i].commands, is_terminal, NIKE_X25519_GEOMETRY)?;
         if !is_terminal {
             fragment.push(NEXT_NODE_HOP_COMMAND);
             fragment.extend_from_slice(&path[i + 1].id);
@@ -900,6 +1122,97 @@ fn create_sphinx_header(
     Ok((header, sprp_keys))
 }
 
+fn create_kemsphinx_x25519_header(
+    path: &[PathHop],
+) -> Result<(Vec<u8>, Vec<([u8; SPRP_KEY_LEN], [u8; STREAM_IV_LEN])>), PacketBuildError> {
+    let nr_hops = path.len();
+    if nr_hops == 0 || nr_hops > NR_HOPS {
+        return Err(PacketBuildError::PathTooLong(nr_hops));
+    }
+
+    let geometry = KEM_X25519_GEOMETRY;
+    let mut kem_elements = vec![[0u8; KEM_X25519_CIPHERTEXT_LEN]; nr_hops];
+    let mut keys = Vec::with_capacity(nr_hops);
+
+    for (idx, hop) in path.iter().enumerate() {
+        let (ciphertext, shared_secret) = kem_adapter_x25519_encapsulate(&hop.public_key)?;
+        kem_elements[idx] = ciphertext;
+        keys.push(derive_packet_keys(&shared_secret)?);
+    }
+
+    let stream_len = geometry.routing_info_len + geometry.per_hop_routing_info_len;
+    let mut ri_key_stream: Vec<Vec<u8>> = Vec::with_capacity(nr_hops);
+    let mut ri_padding: Vec<Vec<u8>> = Vec::with_capacity(nr_hops);
+    for i in 0..nr_hops {
+        let key_stream = aes_ctr_keystream(
+            &keys[i].header_encryption,
+            &keys[i].header_encryption_iv,
+            stream_len,
+        );
+        let ks_len = key_stream.len() - (i + 1) * geometry.per_hop_routing_info_len;
+        ri_key_stream.push(key_stream[..ks_len].to_vec());
+        let mut padding = key_stream[ks_len..].to_vec();
+        if i > 0 {
+            let prev = &ri_padding[i - 1];
+            xor_in_place(&mut padding[..prev.len()], prev);
+        }
+        ri_padding.push(padding);
+    }
+
+    let mut routing_info = Vec::new();
+    let skipped_hops = NR_HOPS - nr_hops;
+    if skipped_hops > 0 {
+        routing_info.resize(skipped_hops * geometry.per_hop_routing_info_len, 0);
+        getrandom::getrandom(&mut routing_info)
+            .map_err(|err| PacketBuildError::Random(err.to_string()))?;
+    }
+
+    let mut mac = [0u8; MAC_LEN];
+    for i in (0..nr_hops).rev() {
+        let is_terminal = i == nr_hops - 1;
+        let mut fragment = serialize_commands(&path[i].commands, is_terminal, geometry)?;
+        if !is_terminal {
+            let kem_offset = geometry.per_hop_routing_info_len - KEM_X25519_CIPHERTEXT_LEN;
+            if fragment.len() + NEXT_NODE_HOP_LEN > kem_offset {
+                return Err(PacketBuildError::RoutingCommandOverflow);
+            }
+            fragment.push(NEXT_NODE_HOP_COMMAND);
+            fragment.extend_from_slice(&path[i + 1].id);
+            fragment.extend_from_slice(&mac);
+        }
+        fragment.resize(geometry.per_hop_routing_info_len, 0);
+        if !is_terminal {
+            let kem_offset = geometry.per_hop_routing_info_len - KEM_X25519_CIPHERTEXT_LEN;
+            fragment[kem_offset..].copy_from_slice(&kem_elements[i + 1]);
+        }
+
+        let mut next_routing_info = Vec::with_capacity(fragment.len() + routing_info.len());
+        next_routing_info.extend_from_slice(&fragment);
+        next_routing_info.extend_from_slice(&routing_info);
+        routing_info = next_routing_info;
+        xor_in_place(&mut routing_info, &ri_key_stream[i]);
+
+        let mut mac_parts: Vec<&[u8]> = vec![&V0_AD, &kem_elements[i], &routing_info];
+        if i > 0 {
+            mac_parts.push(&ri_padding[i - 1]);
+        }
+        mac = hmac_sha256(&keys[i].header_mac, &mac_parts);
+    }
+
+    let mut header = Vec::with_capacity(geometry.header_len);
+    header.extend_from_slice(&V0_AD);
+    header.extend_from_slice(&kem_elements[0]);
+    header.extend_from_slice(&routing_info);
+    header.extend_from_slice(&mac);
+    debug_assert_eq!(header.len(), geometry.header_len);
+
+    let sprp_keys = keys
+        .iter()
+        .map(|key| (key.payload_encryption, key.header_encryption_iv))
+        .collect();
+    Ok((header, sprp_keys))
+}
+
 fn new_sphinx_packet(path: &[PathHop], payload: Vec<u8>) -> Result<Vec<u8>, PacketBuildError> {
     let (header, sprp_keys) = create_sphinx_header(path)?;
     let mut encrypted_payload = Vec::with_capacity(PAYLOAD_TAG_LEN + payload.len());
@@ -913,6 +1226,29 @@ fn new_sphinx_packet(path: &[PathHop], payload: Vec<u8>) -> Result<Vec<u8>, Pack
     packet.extend_from_slice(&header);
     packet.extend_from_slice(&encrypted_payload);
     debug_assert_eq!(packet.len(), PACKET_LEN);
+    Ok(packet)
+}
+
+fn new_kemsphinx_x25519_packet(
+    path: &[PathHop],
+    payload: Vec<u8>,
+) -> Result<Vec<u8>, PacketBuildError> {
+    let geometry = KEM_X25519_GEOMETRY;
+    if payload.len() != geometry.forward_payload_len {
+        return Err(PacketBuildError::PayloadTooLong);
+    }
+    let (header, sprp_keys) = create_kemsphinx_x25519_header(path)?;
+    let mut encrypted_payload = Vec::with_capacity(PAYLOAD_TAG_LEN + payload.len());
+    encrypted_payload.resize(PAYLOAD_TAG_LEN, 0);
+    encrypted_payload.extend_from_slice(&payload);
+    for (key, iv) in sprp_keys.iter().rev() {
+        encrypted_payload = zears::Aez::new(key).encrypt(iv, &[], 0, &encrypted_payload);
+    }
+
+    let mut packet = Vec::with_capacity(geometry.packet_len);
+    packet.extend_from_slice(&header);
+    packet.extend_from_slice(&encrypted_payload);
+    debug_assert_eq!(packet.len(), geometry.packet_len);
     Ok(packet)
 }
 
@@ -934,6 +1270,29 @@ fn new_surb(path: &[PathHop]) -> Result<(Vec<u8>, Vec<u8>), PacketBuildError> {
     surb.extend_from_slice(&path[0].id);
     surb.extend_from_slice(&key_payload);
     debug_assert_eq!(surb.len(), SURB_LEN);
+
+    Ok((surb, surb_keys))
+}
+
+fn new_kemsphinx_x25519_surb(path: &[PathHop]) -> Result<(Vec<u8>, Vec<u8>), PacketBuildError> {
+    let geometry = KEM_X25519_GEOMETRY;
+    let mut key_payload = [0u8; SPRP_KEY_LEN + STREAM_IV_LEN];
+    getrandom::getrandom(&mut key_payload)
+        .map_err(|err| PacketBuildError::Random(err.to_string()))?;
+
+    let (header, sprp_keys) = create_kemsphinx_x25519_header(path)?;
+    let mut surb_keys = Vec::with_capacity((path.len() + 1) * (SPRP_KEY_LEN + STREAM_IV_LEN));
+    for (key, iv) in sprp_keys.iter().rev() {
+        surb_keys.extend_from_slice(key);
+        surb_keys.extend_from_slice(iv);
+    }
+    surb_keys.extend_from_slice(&key_payload);
+
+    let mut surb = Vec::with_capacity(geometry.surb_len);
+    surb.extend_from_slice(&header);
+    surb.extend_from_slice(&path[0].id);
+    surb.extend_from_slice(&key_payload);
+    debug_assert_eq!(surb.len(), geometry.surb_len);
 
     Ok((surb, surb_keys))
 }
@@ -1035,6 +1394,77 @@ fn build_sphinx_packet_with_surb_bytes(
     })
 }
 
+fn validate_kemsphinx_scheme(kem_name: &str) -> Result<(), PacketBuildError> {
+    if kem_name.eq_ignore_ascii_case(KEM_X25519_NAME) {
+        return Ok(());
+    }
+    Err(PacketBuildError::UnsupportedKem(kem_name.to_string()))
+}
+
+fn build_kemsphinx_packet_bytes(
+    raw_consensus: &[u8],
+    ed25519_trust_anchors: &[u8],
+    threshold: usize,
+    current_epoch: u64,
+    max_future_epochs: u64,
+    kem_name: &str,
+    gateway_endpoint: &str,
+    service_capability: &str,
+    payload: &[u8],
+) -> Result<Vec<u8>, PacketBuildError> {
+    validate_kemsphinx_scheme(kem_name)?;
+    let (_, doc, _) = verify_certificate(
+        raw_consensus,
+        ed25519_trust_anchors,
+        threshold,
+        current_epoch,
+        max_future_epochs,
+    )?;
+    let (path, _) = select_mvp3_path(&doc, gateway_endpoint, service_capability)?;
+    let payload = service_forward_payload_for(KEM_X25519_GEOMETRY, payload)?;
+    new_kemsphinx_x25519_packet(&path, payload)
+}
+
+fn build_kemsphinx_packet_with_surb_bytes(
+    raw_consensus: &[u8],
+    ed25519_trust_anchors: &[u8],
+    threshold: usize,
+    current_epoch: u64,
+    max_future_epochs: u64,
+    kem_name: &str,
+    gateway_endpoint: &str,
+    service_capability: &str,
+    payload: &[u8],
+) -> Result<SphinxPacketWithSURB, PacketBuildError> {
+    validate_kemsphinx_scheme(kem_name)?;
+    let (_, doc, _) = verify_certificate(
+        raw_consensus,
+        ed25519_trust_anchors,
+        threshold,
+        current_epoch,
+        max_future_epochs,
+    )?;
+    let (forward_path, _) = select_mvp3_path(&doc, gateway_endpoint, service_capability)?;
+
+    let mut recipient = [0u8; RECIPIENT_ID_LEN];
+    let mut surb_id = [0u8; SURB_ID_LEN];
+    getrandom::getrandom(&mut recipient)
+        .map_err(|err| PacketBuildError::Random(err.to_string()))?;
+    getrandom::getrandom(&mut surb_id).map_err(|err| PacketBuildError::Random(err.to_string()))?;
+
+    let reply_path = select_reply_path(&doc, gateway_endpoint, recipient, surb_id)?;
+    let (surb, surb_keys) = new_kemsphinx_x25519_surb(&reply_path)?;
+    let payload = service_forward_payload_with_surb_for(KEM_X25519_GEOMETRY, payload, &surb)?;
+    let packet = new_kemsphinx_x25519_packet(&forward_path, payload)?;
+
+    Ok(SphinxPacketWithSURB {
+        packet,
+        recipient: recipient.to_vec(),
+        surb_id: surb_id.to_vec(),
+        surb_keys,
+    })
+}
+
 #[wasm_bindgen]
 pub fn build_sphinx_packet(
     raw_consensus: &[u8],
@@ -1060,6 +1490,32 @@ pub fn build_sphinx_packet(
 }
 
 #[wasm_bindgen]
+pub fn build_kemsphinx_packet(
+    raw_consensus: &[u8],
+    ed25519_trust_anchors: &[u8],
+    threshold: usize,
+    current_epoch: u64,
+    max_future_epochs: u64,
+    kem_name: &str,
+    gateway_endpoint: &str,
+    service_capability: &str,
+    payload: &[u8],
+) -> Result<Vec<u8>, JsValue> {
+    build_kemsphinx_packet_bytes(
+        raw_consensus,
+        ed25519_trust_anchors,
+        threshold,
+        current_epoch,
+        max_future_epochs,
+        kem_name,
+        gateway_endpoint,
+        service_capability,
+        payload,
+    )
+    .map_err(|err| JsValue::from_str(&err.to_string()))
+}
+
+#[wasm_bindgen]
 pub fn build_sphinx_packet_with_surb(
     raw_consensus: &[u8],
     ed25519_trust_anchors: &[u8],
@@ -1076,6 +1532,33 @@ pub fn build_sphinx_packet_with_surb(
         threshold,
         current_epoch,
         max_future_epochs,
+        gateway_endpoint,
+        service_capability,
+        payload,
+    )
+    .map_err(|err| JsValue::from_str(&err.to_string()))?;
+    serde_wasm_bindgen::to_value(&packet).map_err(|err| JsValue::from_str(&err.to_string()))
+}
+
+#[wasm_bindgen]
+pub fn build_kemsphinx_packet_with_surb(
+    raw_consensus: &[u8],
+    ed25519_trust_anchors: &[u8],
+    threshold: usize,
+    current_epoch: u64,
+    max_future_epochs: u64,
+    kem_name: &str,
+    gateway_endpoint: &str,
+    service_capability: &str,
+    payload: &[u8],
+) -> Result<JsValue, JsValue> {
+    let packet = build_kemsphinx_packet_with_surb_bytes(
+        raw_consensus,
+        ed25519_trust_anchors,
+        threshold,
+        current_epoch,
+        max_future_epochs,
+        kem_name,
         gateway_endpoint,
         service_capability,
         payload,
@@ -1129,26 +1612,32 @@ mod tests {
         is_gateway_node: bool,
     }
 
-    fn signed_consensus(epoch: u64, expiration: u64) -> (Vec<u8>, Vec<u8>) {
+    #[derive(Serialize, Clone)]
+    #[serde(rename_all = "PascalCase")]
+    struct TestRouteDocument {
+        epoch: u64,
+        topology: Vec<Vec<TestRouteMixDescriptor>>,
+        gateway_nodes: Vec<TestRouteMixDescriptor>,
+        service_nodes: Vec<TestRouteMixDescriptor>,
+    }
+
+    #[derive(Serialize, Clone)]
+    #[serde(rename_all = "PascalCase")]
+    struct TestRouteMixDescriptor {
+        name: String,
+        #[serde(with = "serde_bytes")]
+        identity_key: Vec<u8>,
+        mix_keys: BTreeMap<u64, ByteBuf>,
+        addresses: BTreeMap<String, Vec<String>>,
+        kaetzchen: BTreeMap<String, BTreeMap<String, serde_cbor::Value>>,
+        is_gateway_node: bool,
+        is_service_node: bool,
+    }
+
+    fn wrap_signed_consensus(certified: Vec<u8>, expiration: u64) -> (Vec<u8>, Vec<u8>) {
         let signing_key = SigningKey::from_bytes(&[7u8; 32]);
         let verifying_key = signing_key.verifying_key();
         let trust_anchor = verifying_key.to_bytes().to_vec();
-
-        let mut addresses = BTreeMap::new();
-        addresses.insert(
-            WEBTRANSPORT_TRANSPORT.to_string(),
-            vec!["https://gateway.example:443/.well-known/katzenpost-wt".to_string()],
-        );
-        let certified = serde_cbor::to_vec(&TestDocument {
-            epoch,
-            gateway_nodes: vec![TestMixDescriptor {
-                name: "gateway1".to_string(),
-                addresses,
-                is_gateway_node: true,
-            }],
-        })
-        .unwrap();
-
         let mut message = Vec::new();
         message.extend_from_slice(&CERT_VERSION.to_le_bytes());
         message.extend_from_slice(&expiration.to_le_bytes());
@@ -1175,6 +1664,111 @@ mod tests {
         })
         .unwrap();
         (raw, trust_anchor)
+    }
+
+    fn signed_consensus(epoch: u64, expiration: u64) -> (Vec<u8>, Vec<u8>) {
+        let mut addresses = BTreeMap::new();
+        addresses.insert(
+            WEBTRANSPORT_TRANSPORT.to_string(),
+            vec!["https://gateway.example:443/.well-known/katzenpost-wt".to_string()],
+        );
+        let certified = serde_cbor::to_vec(&TestDocument {
+            epoch,
+            gateway_nodes: vec![TestMixDescriptor {
+                name: "gateway1".to_string(),
+                addresses,
+                is_gateway_node: true,
+            }],
+        })
+        .unwrap();
+        wrap_signed_consensus(certified, expiration)
+    }
+
+    fn test_x25519_public(seed: u8) -> Vec<u8> {
+        PublicKey::from(&StaticSecret::from([seed; 32]))
+            .to_bytes()
+            .to_vec()
+    }
+
+    fn route_descriptor(
+        name: &str,
+        epoch: u64,
+        seed: u8,
+        addresses: BTreeMap<String, Vec<String>>,
+        kaetzchen: BTreeMap<String, BTreeMap<String, serde_cbor::Value>>,
+        is_gateway_node: bool,
+        is_service_node: bool,
+    ) -> TestRouteMixDescriptor {
+        let mut mix_keys = BTreeMap::new();
+        mix_keys.insert(epoch, ByteBuf::from(test_x25519_public(seed)));
+        TestRouteMixDescriptor {
+            name: name.to_string(),
+            identity_key: vec![seed; 32],
+            mix_keys,
+            addresses,
+            kaetzchen,
+            is_gateway_node,
+            is_service_node,
+        }
+    }
+
+    fn signed_routing_consensus(epoch: u64, expiration: u64) -> (Vec<u8>, Vec<u8>, String) {
+        let gateway_endpoint = "https://gateway.example:443/.well-known/katzenpost-wt".to_string();
+
+        let mut gateway_addresses = BTreeMap::new();
+        gateway_addresses.insert(
+            WEBTRANSPORT_TRANSPORT.to_string(),
+            vec![gateway_endpoint.clone()],
+        );
+        let gateway = route_descriptor(
+            "gateway1",
+            epoch,
+            11,
+            gateway_addresses,
+            BTreeMap::new(),
+            true,
+            false,
+        );
+
+        let mut topology = Vec::new();
+        for (idx, seed) in [21u8, 22, 23].into_iter().enumerate() {
+            topology.push(vec![route_descriptor(
+                &format!("mix{}", idx + 1),
+                epoch,
+                seed,
+                BTreeMap::new(),
+                BTreeMap::new(),
+                false,
+                false,
+            )]);
+        }
+
+        let mut kaetzchen_params = BTreeMap::new();
+        kaetzchen_params.insert(
+            "endpoint".to_string(),
+            serde_cbor::Value::Text("+echo".to_string()),
+        );
+        let mut kaetzchen = BTreeMap::new();
+        kaetzchen.insert("echo".to_string(), kaetzchen_params);
+        let service = route_descriptor(
+            "service1",
+            epoch,
+            31,
+            BTreeMap::new(),
+            kaetzchen,
+            false,
+            true,
+        );
+
+        let certified = serde_cbor::to_vec(&TestRouteDocument {
+            epoch,
+            topology,
+            gateway_nodes: vec![gateway],
+            service_nodes: vec![service],
+        })
+        .unwrap();
+        let (raw, trust_anchor) = wrap_signed_consensus(certified, expiration);
+        (raw, trust_anchor, gateway_endpoint)
     }
 
     #[test]
@@ -1316,5 +1910,93 @@ mod tests {
             hex::encode(out),
             "76b8e0ada0f13d90405d6ae55386bd28bdd219b8a08ded1aa836efcc8b770dc7"
         );
+    }
+
+    #[test]
+    fn blake2xb_xof_matches_go_kem_adapter_hash() {
+        let mut shared_secret = [0u8; 32];
+        let mut recipient_public = [0u8; 32];
+        let mut ephemeral_public = [0u8; 32];
+        for i in 0..32 {
+            shared_secret[i] = i as u8;
+            recipient_public[i] = (32 + i) as u8;
+            ephemeral_public[i] = (64 + i) as u8;
+        }
+
+        let out = kem_adapter_x25519_hash(&shared_secret, &recipient_public, &ephemeral_public);
+        assert_eq!(
+            hex::encode(out),
+            "ffdf4251e4df58a87f08de9a0d43d8848f9c684c1f4181d7ccce56714bb57ad1"
+        );
+    }
+
+    #[test]
+    fn kemsphinx_x25519_packet_uses_kem_geometry() {
+        let (raw, trust_anchor, gateway_endpoint) = signed_routing_consensus(42, 44);
+
+        let packet = build_kemsphinx_packet_bytes(
+            &raw,
+            &trust_anchor,
+            1,
+            42,
+            1,
+            KEM_X25519_NAME,
+            &gateway_endpoint,
+            "echo",
+            b"kemsphinx payload",
+        )
+        .unwrap();
+
+        assert_eq!(packet.len(), KEM_X25519_PACKET_LEN);
+        assert_eq!(&packet[..2], &V0_AD);
+        assert_ne!(
+            &packet[2..2 + KEM_X25519_CIPHERTEXT_LEN],
+            &[0u8; KEM_X25519_CIPHERTEXT_LEN]
+        );
+    }
+
+    #[test]
+    fn kemsphinx_x25519_surb_uses_kem_geometry() {
+        let (raw, trust_anchor, gateway_endpoint) = signed_routing_consensus(42, 44);
+
+        let with_surb = build_kemsphinx_packet_with_surb_bytes(
+            &raw,
+            &trust_anchor,
+            1,
+            42,
+            1,
+            KEM_X25519_NAME,
+            &gateway_endpoint,
+            "echo",
+            b"kemsphinx with surb",
+        )
+        .unwrap();
+
+        assert_eq!(with_surb.packet.len(), KEM_X25519_PACKET_LEN);
+        assert_eq!(with_surb.recipient.len(), RECIPIENT_ID_LEN);
+        assert_eq!(with_surb.surb_id.len(), SURB_ID_LEN);
+        assert_eq!(
+            with_surb.surb_keys.len(),
+            5 * (SPRP_KEY_LEN + STREAM_IV_LEN)
+        );
+    }
+
+    #[test]
+    fn kemsphinx_rejects_unsupported_scheme() {
+        let (raw, trust_anchor, gateway_endpoint) = signed_routing_consensus(42, 44);
+        let err = build_kemsphinx_packet_bytes(
+            &raw,
+            &trust_anchor,
+            1,
+            42,
+            1,
+            "XWING",
+            &gateway_endpoint,
+            "echo",
+            b"payload",
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, PacketBuildError::UnsupportedKem(name) if name == "XWING"));
     }
 }

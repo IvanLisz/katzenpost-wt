@@ -20,16 +20,19 @@ Implemented in this MVP:
 - Open a long-lived online WebTransport receiver session for a client-generated
   SURB recipient and receive matching SURB replies asynchronously while the
   browser is online.
+- Build KEMSphinx packets and SURBs in Rust/WASM for the Katzenpost `x25519`
+  KEM adapter geometry. This is the MVP6 KEMSphinx framing path; post-quantum
+  KEMs are still out of scope for this slice.
 - Provide a small browser UI that shows `valid`, `invalid`, or `stale`.
 
 Not implemented yet:
 
 - Xwing `pqXX` wire handshake in Rust/WASM.
-- KEMSphinx packet construction.
+- Post-quantum KEMSphinx schemes such as `XWING` or `MLKEM768-X25519`.
 - Browser storage for identity keys, cached consensus, pending SURBs, and
   mailbox state.
 
-The MVP3/MVP4/MVP5 path uses WebTransport only as a transport cable: the
+The MVP3/MVP4/MVP5/MVP6 path uses WebTransport only as a transport cable: the
 browser/WASM verifies the consensus, builds Sphinx packets, generates SURBs,
 and decrypts replies locally, while the gateway only validates packet
 length/geometry, enqueues packets into the normal server incoming path, and
@@ -73,3 +76,13 @@ gateway responds with `receiver_ack` and keeps the stream open. Any future
 SURB reply for that recipient is delivered as a `surb_reply` frame on the open
 stream. If the browser disconnects, the gateway unregisters the online receiver;
 offline mailbox/Pigeonhole delivery is deliberately out of scope for this MVP.
+
+The live smoke script defaults to the reduced NIKE/X25519 topology. For a
+KEMSphinx/X25519-adapter topology, run it with:
+
+```sh
+KPWT_SPHINX_MODE=kem-x25519 KPWT_KEM=x25519 npm run smoke:live
+```
+
+Use `KPWT_TOPOLOGY_ROOT=/path/to/docker/topology` when testing a non-default
+generated topology.

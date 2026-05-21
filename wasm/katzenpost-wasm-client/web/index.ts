@@ -1,4 +1,6 @@
 import init, {
+  build_kemsphinx_packet,
+  build_kemsphinx_packet_with_surb,
   build_sphinx_packet,
   build_sphinx_packet_with_surb,
   check_consensus,
@@ -171,6 +173,56 @@ export async function buildSphinxPacketWithSURB(
     threshold,
     currentEpoch,
     maxFutureEpochs,
+    gatewayEndpoint,
+    serviceCapability,
+    payload,
+  ) as SphinxPacketWithSURB;
+}
+
+export async function buildKEMSphinxPacket(
+  rawConsensus: Uint8Array,
+  ed25519TrustAnchors: Uint8Array,
+  threshold: number,
+  currentEpoch: bigint,
+  gatewayEndpoint: string,
+  serviceCapability: string,
+  payload: Uint8Array,
+  kemName = "x25519",
+  maxFutureEpochs = 1n,
+): Promise<Uint8Array> {
+  await init();
+  return build_kemsphinx_packet(
+    rawConsensus,
+    ed25519TrustAnchors,
+    threshold,
+    currentEpoch,
+    maxFutureEpochs,
+    kemName,
+    gatewayEndpoint,
+    serviceCapability,
+    payload,
+  );
+}
+
+export async function buildKEMSphinxPacketWithSURB(
+  rawConsensus: Uint8Array,
+  ed25519TrustAnchors: Uint8Array,
+  threshold: number,
+  currentEpoch: bigint,
+  gatewayEndpoint: string,
+  serviceCapability: string,
+  payload: Uint8Array,
+  kemName = "x25519",
+  maxFutureEpochs = 1n,
+): Promise<SphinxPacketWithSURB> {
+  await init();
+  return build_kemsphinx_packet_with_surb(
+    rawConsensus,
+    ed25519TrustAnchors,
+    threshold,
+    currentEpoch,
+    maxFutureEpochs,
+    kemName,
     gatewayEndpoint,
     serviceCapability,
     payload,
